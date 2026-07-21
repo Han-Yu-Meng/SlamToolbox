@@ -71,6 +71,7 @@ def main():
                     "1. Bag Recorder (录制 Bag 包)",
                     "2. Frame Extractor (帧提取)",
                     "3. Map Builder (点云地图构建)",
+                    "4. ERASOR2 (动态障碍物去除)",
                     "返回上一级"
                 ]
             ).ask()
@@ -84,6 +85,9 @@ def main():
             elif "3. Map Builder" in sub_action:
                 from .builder import start_building
                 start_building(map_path)
+            elif "4. ERASOR2" in sub_action:
+                from .erasor2 import start_erasor2
+                start_erasor2(map_path)
 
         elif action == "2. 2D Map":
             sub_action = questionary.select(
