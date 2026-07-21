@@ -1,8 +1,4 @@
 *.egg-info
 __pycache__/
 
-# ERASOR2 C++ 二进制 (大文件，本地编译)
-slam_toolbox/bin/erasor2/
-
-# Removert catkin workspace
-slam_toolbox/removert/
+build/*
