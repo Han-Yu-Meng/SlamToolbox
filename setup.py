@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="slam_toolbox",
-    version="0.1.7",
+    version="0.1.8",
     packages=find_packages(),
     install_requires=[
         "questionary>=2.0.0",
