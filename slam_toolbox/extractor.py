@@ -1,10 +1,14 @@
 import os
 import struct
 import re
+import warnings
 import questionary
 import numpy as np
 import open3d as o3d
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.console import Console
+
+console = Console()
 
 try:
     import rosbag2_py
@@ -74,35 +78,113 @@ def lookup_transform(tf_buffer, parent, child, timestamp):
             return result
     if key in tf_buffer['static']:
         return tf_buffer['static'][key][1]
+    # 尝试反向查找
+    rev_key = (child, parent)
+    if rev_key in tf_buffer['dynamic']:
+        result = _find_transform_at(tf_buffer['dynamic'][rev_key], timestamp)
+        if result is not None:
+            return _invert_transform(result)
+    if rev_key in tf_buffer['static']:
+        return _invert_transform(tf_buffer['static'][rev_key][1])
     return None
 
 
-def _lookup_or_eye(tf_buffer, parent, child, timestamp):
+def _lookup_or_eye(tf_buffer, parent, child, timestamp, warn_set, warn_tag):
+    """查找 TF 变换；若缺失则发出一次性警告并返回单位阵。"""
     T = lookup_transform(tf_buffer, parent, child, timestamp)
-    return T if T is not None else np.eye(4)
+    if T is not None:
+        return T
+
+    # 发出一次性警告
+    if warn_tag not in warn_set:
+        warn_set.add(warn_tag)
+        warnings.warn(
+            f"[TF 链断裂] 无法找到 {parent} → {child} 的 TF 变换，"
+            f"已使用单位阵代替。请检查 bag 中是否录制了 /tf 与 /tf_static，"
+            f"或确认 config.yaml 中 fixed_frame / base_link_frame 是否正确。"
+        )
+    return np.eye(4)
 
 
 # ---------------------------------------------------------------------------
-# 坐标变换核心
+# 坐标变换核心（使用 config 中的 frame 名称）
 # ---------------------------------------------------------------------------
 
-def _compute_cloud_to_baselink_ref(tf_buffer, cloud_frame, msg_sec, window_start):
-    """cloud_frame(t) → base_link(t) → odom → base_link(t0)"""
-    if cloud_frame == "base_link":
+def _compute_cloud_to_baselink_ref(
+    tf_buffer, cloud_frame, msg_sec, window_start,
+    fixed_frame, base_link_frame, warn_set,
+):
+    """
+    计算点云从 cloud_frame(t) → base_link_frame(t0) 的累积变换。
+
+    变换链:
+      cloud_frame(t) → base_link_frame(t) → fixed_frame → base_link_frame(t0)
+
+    其中 fixed_frame 是世界坐标系（如 "odom"），
+    base_link_frame 是机器人底盘坐标系，
+    fixed_frame → base_link_frame 表示机器人在世界中的位姿。
+    """
+    # Step 1: cloud_frame → base_link_frame (at time t)
+    if cloud_frame == base_link_frame:
         T_cloud_to_baselink = np.eye(4)
-    elif cloud_frame in ("odom", "map"):
-        T_odom_base_t = _lookup_or_eye(tf_buffer, "odom", "base_link", msg_sec)
-        T_cloud_to_baselink = _invert_transform(T_odom_base_t)
+    elif cloud_frame == fixed_frame:
+        # cloud 已经在世界系，需要 base_link(t) → fixed_frame 的逆
+        tag = f"tf_miss:{fixed_frame}->{base_link_frame}@t"
+        T_fixed_to_base_t = _lookup_or_eye(
+            tf_buffer, fixed_frame, base_link_frame, msg_sec,
+            warn_set, tag,
+        )
+        T_cloud_to_baselink = _invert_transform(T_fixed_to_base_t)
     else:
-        T_cloud_to_baselink = _lookup_or_eye(tf_buffer, "base_link", cloud_frame, msg_sec)
+        # 一般情况：先尝试直接查找 base_link_frame → cloud_frame
+        T_cloud_to_baselink = lookup_transform(
+            tf_buffer, base_link_frame, cloud_frame, msg_sec,
+        )
 
-    T_odom_base_t   = _lookup_or_eye(tf_buffer, "odom", "base_link", msg_sec)
-    T_odom_base_ref = _lookup_or_eye(tf_buffer, "odom", "base_link", window_start)
+        if T_cloud_to_baselink is None:
+            # 直接查找失败 → 尝试通过 fixed_frame 做多跳组合:
+            #   cloud_frame → fixed_frame → base_link_frame
+            T_fixed_to_cloud = lookup_transform(
+                tf_buffer, fixed_frame, cloud_frame, msg_sec,
+            )
+            T_fixed_to_base = lookup_transform(
+                tf_buffer, fixed_frame, base_link_frame, msg_sec,
+            )
 
-    T_baselink_t_to_t0 = _invert_transform(T_odom_base_ref) @ T_odom_base_t
+            if T_fixed_to_cloud is not None and T_fixed_to_base is not None:
+                # 拼合: cloud→fixed 再 inv(fixed→base) = cloud→base_link
+                T_cloud_to_baselink = (
+                    _invert_transform(T_fixed_to_base) @ T_fixed_to_cloud
+                )
+            else:
+                # 所有路径都失败 → 警告并使用单位阵
+                tag = f"tf_miss:{base_link_frame}->{cloud_frame}"
+                T_cloud_to_baselink = _lookup_or_eye(
+                    tf_buffer, base_link_frame, cloud_frame, msg_sec,
+                    warn_set, tag,
+                )
+
+    # Step 2: base_link_frame(t) → fixed_frame (机器人当前位姿)
+    tag_t = f"tf_miss:{fixed_frame}->{base_link_frame}@t"
+    T_fixed_to_base_t = _lookup_or_eye(
+        tf_buffer, fixed_frame, base_link_frame, msg_sec,
+        warn_set, tag_t,
+    )
+
+    # Step 3: fixed_frame → base_link_frame(t0) (参考位姿)
+    tag_ref = f"tf_miss:{fixed_frame}->{base_link_frame}@ref"
+    T_fixed_to_base_ref = _lookup_or_eye(
+        tf_buffer, fixed_frame, base_link_frame, window_start,
+        warn_set, tag_ref,
+    )
+
+    # base_link_frame(t) → base_link_frame(t0)
+    T_baselink_t_to_t0 = _invert_transform(T_fixed_to_base_ref) @ T_fixed_to_base_t
+
+    # 完整变换: cloud_frame(t) → base_link_frame(t0)
     T_rel = T_baselink_t_to_t0 @ T_cloud_to_baselink
 
-    return T_rel, T_odom_base_ref
+    return T_rel, T_fixed_to_base_ref
 
 
 # ---------------------------------------------------------------------------
@@ -165,10 +247,36 @@ DATA binary
 # 主逻辑
 # ---------------------------------------------------------------------------
 
-def start_extraction(map_path):
+def start_extraction(map_path, config=None):
+    """从 rosbag 中提取点云帧，按时间窗口累积并保存为 PCD。
+
+    参数:
+        map_path: 地图目录路径
+        config:   配置字典，为 None 时使用默认值
+    """
     if rosbag2_py is None:
-        print("错误: 无法导入 rosbag2_py。请确保是在激活的 ROS2 终端中运行。")
+        console.print("[red]错误: 无法导入 rosbag2_py。请确保是在激活的 ROS2 终端中运行。[/red]")
         return
+
+    if config is None:
+        config = {
+            "config": {
+                "fixed_frame": "odom",
+                "base_link_frame": "base_link",
+                "pointcloud_topic": "/cloud_registered",
+            }
+        }
+
+    cfg = config["config"]
+    fixed_frame = cfg["fixed_frame"]
+    base_link_frame = cfg["base_link_frame"]
+    pointcloud_topic = cfg["pointcloud_topic"]
+
+    console.print(
+        f"[dim]提取配置: fixed_frame={fixed_frame}, "
+        f"base_link_frame={base_link_frame}, "
+        f"pointcloud_topic={pointcloud_topic}[/dim]"
+    )
 
     bag_dir = os.path.join(map_path, "bag")
     frame_dir = os.path.join(map_path, "frame")
@@ -182,10 +290,12 @@ def start_extraction(map_path):
                 break
 
     if not db_file:
-        print(f"未在 {bag_dir} 下找到 .db3 或 .mcap。")
+        console.print(f"[red]未在 {bag_dir} 下找到 .db3 或 .mcap。[/red]")
         return
 
-    interval_str = questionary.text("请输入点云累计保存时长间隔 (秒):", default="1.0").ask()
+    interval_str = questionary.text(
+        "请输入点云累计保存时长间隔 (秒):", default="1.0"
+    ).ask()
     try:
         interval = float(interval_str)
     except ValueError:
@@ -194,11 +304,15 @@ def start_extraction(map_path):
     storage_options = rosbag2_py.StorageOptions(uri=bag_dir, storage_id="sqlite3")
     converter_options = rosbag2_py.ConverterOptions(
         input_serialization_format="cdr",
-        output_serialization_format="cdr"
+        output_serialization_format="cdr",
     )
 
+    # 从 config 构建固定变换（补充 bag 中的 TF）
+    from .config import build_fixed_transforms
+    config_static_tf = build_fixed_transforms(config)
+
     # ====== 第一遍：统计 cloud + 收集 TF ======
-    print(f"正在扫描 {db_file} …")
+    console.print(f"正在扫描 {db_file} …")
 
     reader = rosbag2_py.SequentialReader()
     reader.open(storage_options, converter_options)
@@ -221,7 +335,7 @@ def start_extraction(map_path):
 
     while reader.has_next():
         topic, data, _ = reader.read_next()
-        if topic == "/cloud_registered":
+        if topic == pointcloud_topic:
             total_cloud_msgs += 1
         elif tf_msg_cls and topic in ('/tf', '/tf_static'):
             tf_msg = deserialize_message(data, tf_msg_cls)
@@ -237,20 +351,32 @@ def start_extraction(map_path):
                 else:
                     dynamic_tf.setdefault(key, []).append((sec, matrix))
 
+    # 合并 config 中的 fixed_transform（优先级低于 bag 中的 /tf_static）
+    for key, (sec, matrix) in config_static_tf.items():
+        if key not in static_tf:
+            static_tf[key] = (sec, matrix)
+
     for key in dynamic_tf:
         dynamic_tf[key].sort(key=lambda x: x[0])
 
     tf_buffer = {'dynamic': dynamic_tf, 'static': static_tf}
 
     if total_cloud_msgs == 0:
-        print("未找到 /cloud_registered 消息，退出。")
+        console.print(
+            f"[red]未在 bag 中找到话题 '{pointcloud_topic}' 的消息，退出。"
+            f"请检查 config.yaml 中 pointcloud_topic 是否正确。[/red]"
+        )
         return
 
     tf_frames = set()
     for (p, c) in list(dynamic_tf.keys()) + list(static_tf.keys()):
-        tf_frames.add(p); tf_frames.add(c)
-    print(f"  /cloud_registered 消息数: {total_cloud_msgs}")
-    print(f"  TF 帧: {sorted(tf_frames) if tf_frames else '(无)'}")
+        tf_frames.add(p)
+        tf_frames.add(c)
+    console.print(f"  {pointcloud_topic} 消息数: {total_cloud_msgs}")
+    console.print(f"  TF 帧: {sorted(tf_frames) if tf_frames else '(无)'}")
+
+    # 预先检查 TF 链完整性
+    _check_tf_chain(tf_buffer, fixed_frame, base_link_frame, pointcloud_topic)
 
     # ====== 第二遍：按时间窗口累积 ======
     reader.open(storage_options, converter_options)
@@ -263,6 +389,9 @@ def start_extraction(map_path):
     cloud_msg_type = None
     first_cloud_frame = None
     has_intensity = False
+
+    # TF 断链一次性警告集合
+    warn_set = set()
 
     with Progress(
         SpinnerColumn(),
@@ -279,12 +408,12 @@ def start_extraction(map_path):
         while reader.has_next():
             topic, data, t = reader.read_next()
 
-            if topic == "/cloud_registered":
+            if topic == pointcloud_topic:
                 if cloud_msg_type is None:
                     cloud_msg_type = get_message(type_map[topic])
                 msg = deserialize_message(data, cloud_msg_type)
                 sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-                cloud_frame = msg.header.frame_id if msg.header.frame_id else "base_link"
+                cloud_frame = msg.header.frame_id if msg.header.frame_id else base_link_frame
 
                 if first_cloud_frame is None:
                     first_cloud_frame = cloud_frame
@@ -292,11 +421,14 @@ def start_extraction(map_path):
                 if window_start < 0:
                     window_start = sec
 
-                T_rel, T_odom_base_ref = _compute_cloud_to_baselink_ref(
-                    tf_buffer, cloud_frame, sec, window_start)
+                # 核心变换: cloud_frame(t) → base_link_frame(t0)
+                T_rel, T_fixed_to_base_ref = _compute_cloud_to_baselink_ref(
+                    tf_buffer, cloud_frame, sec, window_start,
+                    fixed_frame, base_link_frame, warn_set,
+                )
 
                 if reference_pose is None:
-                    reference_pose = T_odom_base_ref.copy()
+                    reference_pose = T_fixed_to_base_ref.copy()
 
                 xyz, intensity = parse_pc2_msg(msg)
                 if len(xyz) > 0:
@@ -335,8 +467,44 @@ def start_extraction(map_path):
                                 has_intensity)
         frame_idx += 1
 
-    print(f"提取完成！cloud frame_id = \"{first_cloud_frame}\"，"
-          f"共 {frame_idx} 帧，intensity {'✓' if has_intensity else '✗'} → {frame_dir}")
+    # 汇总 TF 断链警告
+    if warn_set:
+        console.print(
+            f"[yellow]⚠ 帧提取过程中出现 {len(warn_set)} 类 TF 链断裂，"
+            f"已使用单位阵代替。详情请查看上方 Python 警告信息。[/yellow]"
+        )
+
+    console.print(
+        f"提取完成！cloud frame_id = \"{first_cloud_frame}\"，"
+        f"共 {frame_idx} 帧，intensity {'✓' if has_intensity else '✗'} → {frame_dir}"
+    )
+
+
+def _check_tf_chain(tf_buffer, fixed_frame, base_link_frame, pointcloud_topic):
+    """预先检查 TF 链的完整性，对缺失的关键链路发出警告。"""
+    all_keys = set()
+    for (p, c) in list(tf_buffer['dynamic'].keys()) + list(tf_buffer['static'].keys()):
+        all_keys.add((p, c))
+        all_keys.add((c, p))  # 反向也算可用
+
+    issues = []
+
+    # 检查 fixed_frame → base_link_frame 是否有变换可用
+    fwd = (fixed_frame, base_link_frame) in all_keys
+    rev = (base_link_frame, fixed_frame) in all_keys
+    if not fwd and not rev:
+        issues.append(
+            f"缺少 {fixed_frame} ↔ {base_link_frame} 的 TF 变换。"
+            f"该变换是机器人的世界位姿，缺少将导致所有帧使用单位阵。"
+        )
+
+    if issues:
+        for msg in issues:
+            warnings.warn(f"[TF 链预检] {msg}")
+        console.print(
+            f"[yellow]⚠ TF 链预检发现问题 ({len(issues)} 项)，"
+            f"详见上方警告。[/yellow]"
+        )
 
 
 def _save_accumulated_frame(frame_dir, frame_idx,
