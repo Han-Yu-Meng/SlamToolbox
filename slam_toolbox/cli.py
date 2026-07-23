@@ -107,12 +107,11 @@ def main():
 
     console.print("[bold green]欢迎使用 SLAM Toolbox CLI[/bold green]\n")
 
-    # 1. 选择工作地图目录
-    dirs = get_map_directories()
-
     NEW_MAP_TOKEN = "新建地图"
 
     while True:
+        # 1. 选择工作地图目录
+        dirs = get_map_directories()
         choices = dirs + [NEW_MAP_TOKEN] if dirs else [NEW_MAP_TOKEN]
         map_name = questionary.select(
             "请选择需要操作的地图目录:",
@@ -130,106 +129,120 @@ def main():
             os.makedirs(os.path.join(MAP_BASE_DIR, new_name, "map"), exist_ok=True)
             dirs = get_map_directories()  # 刷新列表
             map_name = new_name
-            break
-        else:
-            break
 
-    # 设置常用路径
-    map_path = os.path.abspath(os.path.join(MAP_BASE_DIR, map_name))
+        # 设置常用路径
+        map_path = os.path.abspath(os.path.join(MAP_BASE_DIR, map_name))
 
-    # 2. 加载或生成 config.yaml
-    config = _ensure_config(map_path)
+        # 2. 加载或生成 config.yaml
+        config = _ensure_config(map_path)
 
-    # 3. 主功能循环
-    while True:
-        action = questionary.select(
-            f"当前地图: {map_name} | 请选择操作类型:",
-            choices=[
-                "1. 3D Map",
-                "2. 2D Map",
-                "退出"
-            ]
-        ).ask()
-
-        if action == "1. 3D Map":
-            sub_action = questionary.select(
-                "3D Map — 请选择操作:",
+        # 3. 主功能循环
+        change_map = False
+        while True:
+            action = questionary.select(
+                f"当前地图: {map_name} | 请选择操作类型:",
                 choices=[
-                    Choice(
-                        title=[("bold ansiyellow", "数据获取")],
-                        disabled="section",
-                    ),
-                    "   1. 录制 rosbag",
-                    Choice(
-                        title=[("bold ansiyellow", "帧构建")],
-                        disabled="section",
-                    ),
-                    "   2. Frame Extractor",
-                    Choice(
-                        title=[("bold ansiyellow", "位姿修正")],
-                        disabled="section",
-                    ),
-                    "   3. 强制平面约束",
-                    "   4. Interactive SLAM",
-                    Choice(
-                        title=[("bold ansiyellow", "动态障碍物清除")],
-                        disabled="section",
-                    ),
-                    "   5. ERASOR2",
-                    "   6. Removert",
-                    Choice(
-                        title=[("bold ansiyellow", "构建全局地图")],
-                        disabled="section",
-                    ),
-                    "   7. Map Builder",
-                    Choice(
-                        title=[("", "")],
-                        disabled="section",
-                    ),
-                    "   返回上一级",
+                    "1. 3D Map",
+                    "2. 2D Map",
+                    "3. 更换地图",
+                    "退出"
                 ]
             ).ask()
 
-            if sub_action is None or "返回上一级" in sub_action:
-                continue
+            if action == "1. 3D Map":
+                sub_action = questionary.select(
+                    "3D Map — 请选择操作:",
+                    choices=[
+                        Choice(
+                            title=[("bold ansiyellow", "数据获取")],
+                            disabled="section",
+                        ),
+                        "   1. 录制 rosbag",
+                        Choice(
+                            title=[("bold ansiyellow", "帧构建")],
+                            disabled="section",
+                        ),
+                        "   2. Frame Extractor",
+                        Choice(
+                            title=[("bold ansiyellow", "位姿修正")],
+                            disabled="section",
+                        ),
+                        "   3. 强制平面约束",
+                        "   4. Interactive SLAM",
+                        Choice(
+                            title=[("bold ansiyellow", "动态障碍物清除")],
+                            disabled="section",
+                        ),
+                        "   5. ERASOR2",
+                        "   6. Removert",
+                        "   7. Local Hash Voxel",
+                        "   8. Raycast Voxel",
+                        Choice(
+                            title=[("bold ansiyellow", "构建全局地图")],
+                            disabled="section",
+                        ),
+                        "   9. Map Builder",
+                        Choice(
+                            title=[("", "")],
+                            disabled="section",
+                        ),
+                        "   返回上一级",
+                    ]
+                ).ask()
 
-            if "录制 rosbag" in sub_action:
-                from .recorder import start_recording
-                start_recording(map_path, config)
-            elif "Frame Extractor" in sub_action:
-                from .extractor import start_extraction
-                start_extraction(map_path, config)
-            elif "强制平面约束" in sub_action:
-                from .pose_correction import start_planar_constraint
-                start_planar_constraint(map_path)
-            elif "Interactive SLAM" in sub_action:
-                from .pose_correction import start_interactive_slam
-                start_interactive_slam(map_path)
-            elif "ERASOR2" in sub_action:
-                from .dynamic_removal import start_erasor2
-                start_erasor2(map_path)
-            elif "Removert" in sub_action:
-                from .dynamic_removal import start_removert
-                start_removert(map_path)
-            elif "Map Builder" in sub_action:
-                from .builder import start_building
-                start_building(map_path)
+                if sub_action is None or "返回上一级" in sub_action:
+                    continue
 
-        elif action == "2. 2D Map":
-            sub_action = questionary.select(
-                "2D Map 子功能列表:",
-                choices=[
-                    "1. PGM Generator (生成 2D 栅格地图)",
-                    "返回上一级"
-                ]
-            ).ask()
+                if "录制 rosbag" in sub_action:
+                    from .recorder import start_recording
+                    start_recording(map_path, config)
+                elif "Frame Extractor" in sub_action:
+                    from .extractor import start_extraction
+                    start_extraction(map_path, config)
+                elif "强制平面约束" in sub_action:
+                    from .pose_correction import start_planar_constraint
+                    start_planar_constraint(map_path)
+                elif "Interactive SLAM" in sub_action:
+                    from .pose_correction import start_interactive_slam
+                    start_interactive_slam(map_path)
+                elif "ERASOR2" in sub_action:
+                    from .dynamic_removal import start_erasor2
+                    start_erasor2(map_path)
+                elif "Removert" in sub_action:
+                    from .dynamic_removal import start_removert
+                    start_removert(map_path)
+                elif "Local Hash Voxel" in sub_action:
+                    from .dynamic_removal import start_local_hash_voxel
+                    start_local_hash_voxel(map_path)
+                elif "Raycast Voxel" in sub_action:
+                    from .dynamic_removal import start_raycast_voxel
+                    start_raycast_voxel(map_path)
+                elif "Map Builder" in sub_action:
+                    from .builder import start_building
+                    start_building(map_path)
 
-            if "1. PGM Generator" in sub_action:
-                from .pgm_generator import start_generation
-                start_generation(map_path)
+            elif action == "2. 2D Map":
+                sub_action = questionary.select(
+                    "2D Map 子功能列表:",
+                    choices=[
+                        "1. PGM Generator (生成 2D 栅格地图)",
+                        "返回上一级"
+                    ]
+                ).ask()
 
-        else:
-            break
+                if sub_action and "1. PGM Generator" in sub_action:
+                    from .pgm_generator import start_generation
+                    start_generation(map_path)
+
+            elif action == "3. 更换地图":
+                change_map = True
+                break
+
+            else:
+                return
+
+        if change_map:
+            continue
 
 
 if __name__ == "__main__":

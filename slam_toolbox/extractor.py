@@ -16,6 +16,8 @@ try:
     from rosidl_runtime_py.utilities import get_message
 except ImportError:
     rosbag2_py = None
+    deserialize_message = None
+    get_message = None
 
 
 # ---------------------------------------------------------------------------

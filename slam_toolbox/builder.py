@@ -1,4 +1,6 @@
 import os
+import shutil
+from datetime import datetime
 import numpy as np
 import questionary
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, MofNCompleteColumn
@@ -9,6 +11,18 @@ from .extractor import _read_pcd, _write_pcd
 console = Console()
 
 BATCH_SIZE = 15  # 每批帧数，控制内存峰值
+
+
+def _timestamped_output_dir(map_path, method_name):
+    root = os.path.join(map_path, "runs", method_name)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out = os.path.join(root, stamp)
+    suffix = 1
+    while os.path.exists(out):
+        out = os.path.join(root, f"{stamp}_{suffix:02d}")
+        suffix += 1
+    os.makedirs(out, exist_ok=True)
+    return out
 
 
 def _voxel_downsample(xyz, voxel_size, intensity=None):
@@ -47,6 +61,7 @@ def start_building(map_path):
     frame_dir = os.path.join(map_path, "frame")
     map_dir = os.path.join(map_path, "map")
     os.makedirs(map_dir, exist_ok=True)
+    output_dir = _timestamped_output_dir(map_path, "map_builder")
 
     if not os.path.exists(frame_dir):
         console.print(f"[red]帧目录 {frame_dir} 不存在。请先运行 Frame Extractor 功能。[/red]")
@@ -161,21 +176,24 @@ def start_building(map_path):
     console.print("正在最终全局去重...")
     final_xyz, final_intensity = _voxel_downsample(acc_xyz, voxel_size, acc_intensity)
 
-    output_pcd_path = os.path.join(map_dir, "map.pcd")
+    output_pcd_path = os.path.join(output_dir, "map.pcd")
     _write_pcd(output_pcd_path, final_xyz, final_intensity)
+    latest_pcd_path = os.path.join(map_dir, "map.pcd")
+    shutil.copy2(output_pcd_path, latest_pcd_path)
     console.print(f"全局地图拼接完成 → {output_pcd_path}（共 {len(final_xyz):,} 点）")
+    console.print(f"最新地图快捷路径 → {latest_pcd_path}")
 
     # ---- 生成可视化 ----
-    _generate_visualizations(map_path, frame_dir, files, final_xyz)
+    _generate_visualizations(output_dir, frame_dir, files, final_xyz)
 
 
 # ---------------------------------------------------------------------------
 # 可视化
 # ---------------------------------------------------------------------------
 
-def _generate_visualizations(map_path, frame_dir, files, map_xyz):
+def _generate_visualizations(output_dir, frame_dir, files, map_xyz):
     """生成鸟瞰图（Z 轴染色）及轨迹叠加图。"""
-    viz_dir = os.path.join(map_path, "visualize")
+    viz_dir = os.path.join(output_dir, "visualize")
     os.makedirs(viz_dir, exist_ok=True)
 
     try:

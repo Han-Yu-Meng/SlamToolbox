@@ -125,32 +125,53 @@ def start_planar_constraint(map_path):
 # Interactive SLAM
 # ---------------------------------------------------------------------------
 
+def _allow_docker_x11():
+    """Allow the root user inside the local Docker container to open X11 windows."""
+    try:
+        subprocess.run(
+            ["xhost", "+SI:localuser:root"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        console.print("[yellow]警告: 未找到 xhost，Docker GUI 可能无法连接 X11。[/yellow]")
+
+
 def _docker_run_cmd(map_path, rosrun_cmd):
     """构建 docker run 命令，通过 --env 注入 MESA 变量，bash -c 执行 rosrun。"""
     map_abs = os.path.abspath(map_path)
     x11_socket = "/tmp/.X11-unix:/tmp/.X11-unix:rw"
+    display = os.environ.get("DISPLAY", ":0")
+    xauthority = os.environ.get("XAUTHORITY") or os.path.expanduser("~/.Xauthority")
 
     bash_cmd = (
         "source /root/catkin_ws/devel/setup.bash && "
         f"{rosrun_cmd}"
     )
 
-    return [
+    cmd = [
         "docker", "run", "-it",
         "--net=host",
-        "--env", "DISPLAY",
+        "--env", f"DISPLAY={display}",
+        "--env", "HOME=/root",
         "--env", "QT_X11_NO_MITSHM=1",
         "--env", "MESA_GL_VERSION_OVERRIDE=4.5",
         "--env", "MESA_GLSL_VERSION_OVERRIDE=450",
         "--volume", f"{x11_socket}",
         "--volume", f"{map_abs}:/Map:rw",
+        "--volume", f"{map_abs}:/root/Map:rw",
+    ]
+    if os.path.exists(xauthority):
+        cmd.extend([
+            "--env", "XAUTHORITY=/tmp/.docker.xauth",
+            "--volume", f"{xauthority}:/tmp/.docker.xauth:ro",
+        ])
+    cmd.extend([
         INTERACTIVE_SLAM_IMAGE,
         "/bin/bash", "-c", bash_cmd,
-
-
-
-
-    ]
+    ])
+    return cmd
 
 
 def start_interactive_slam(map_path):
@@ -206,6 +227,7 @@ def start_interactive_slam(map_path):
 
     console.print("[dim]正在启动 Docker 容器...[/dim]")
     os.makedirs(original_dir, exist_ok=True)
+    _allow_docker_x11()
 
     ret = subprocess.call(
         _docker_run_cmd(map_path, "rosrun interactive_slam odometry2graph")
@@ -243,6 +265,7 @@ def start_interactive_slam(map_path):
 
     console.print("[dim]正在启动 Docker 容器...[/dim]")
     os.makedirs(corrected_dir, exist_ok=True)
+    _allow_docker_x11()
 
     ret = subprocess.call(
         _docker_run_cmd(map_path, "rosrun interactive_slam interactive_slam")
